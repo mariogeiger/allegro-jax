@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import e3nn_jax as e3nn
 import flax
@@ -74,6 +74,21 @@ class AllegroLayer(flax.linen.Module):
         return (x, V)
 
 
+def filter_layers(layer_irreps: List[e3nn.Irreps], max_ell: int) -> List[e3nn.Irreps]:
+    layer_irreps = list(layer_irreps)
+    filtered = [e3nn.Irreps(layer_irreps[-1])]
+    for irreps in reversed(layer_irreps[:-1]):
+        irreps = e3nn.Irreps(irreps)
+        irreps = irreps.filter(
+            keep=e3nn.tensor_product(
+                filtered[0],
+                e3nn.Irreps.spherical_harmonics(lmax=max_ell),
+            ).regroup()
+        )
+        filtered.insert(0, irreps)
+    return filtered
+
+
 class Allegro(flax.linen.Module):
     avg_num_neighbors: float
     max_ell: int = 3
@@ -107,6 +122,9 @@ class Allegro(flax.linen.Module):
         irreps = e3nn.Irreps(self.irreps)
         irreps_out = e3nn.Irreps(self.output_irreps)
 
+        irreps_layers = [irreps] * self.num_layers + [irreps_out]
+        irreps_layers = filter_layers(irreps_layers, self.max_ell)
+
         vectors = vectors / self.radial_cutoff
 
         d = e3nn.norm(vectors).array.squeeze(1)
@@ -136,7 +154,7 @@ class Allegro(flax.linen.Module):
         x = u(d, self.p)[:, None] * x
         assert x.shape == (num_edges, self.mlp_n_hidden)
 
-        irreps_Y = irreps.filter(
+        irreps_Y = irreps_layers[0].filter(
             keep=lambda mir: vectors.irreps[0].ir.p ** mir.ir.l == mir.ir.p
         )
         V = e3nn.spherical_harmonics(irreps_Y, vectors, True)
@@ -148,11 +166,11 @@ class Allegro(flax.linen.Module):
         V = w * V
         assert V.shape == (num_edges, V.irreps.dim)
 
-        for _ in range(self.num_layers):
+        for irreps in irreps_layers[1:]:
             y, V = AllegroLayer(
                 avg_num_neighbors=self.avg_num_neighbors,
                 max_ell=self.max_ell,
-                output_irreps=self.irreps,
+                output_irreps=irreps,
                 mlp_activation=self.mlp_activation,
                 mlp_n_hidden=self.mlp_n_hidden,
                 mlp_n_layers=self.mlp_n_layers,

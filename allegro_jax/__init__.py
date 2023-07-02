@@ -1,5 +1,5 @@
-from .allegro import AllegroLayer
+from .allegro import AllegroLayer, Allegro
 
 __version__ = "1.0.0"
 
-__all__ = ["AllegroLayer"]
+__all__ = ["AllegroLayer", "Allegro"]

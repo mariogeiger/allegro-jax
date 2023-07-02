@@ -33,42 +33,43 @@ class AllegroLayer(flax.linen.Module):
         self,
         vectors: e3nn.IrrepsArray,  # [n_edges, 3]
         x: jnp.ndarray,  # [n_edges, features]
-        V: e3nn.IrrepsArray,  # [n_edges, n, irreps]
+        V: e3nn.IrrepsArray,  # [n_edges, irreps]
         senders: jnp.ndarray,  # [n_edges]
     ) -> e3nn.IrrepsArray:
-        irreps_out = e3nn.Irreps(self.output_irreps)
-        n = V.shape[1]
+        num_edges = vectors.shape[0]
+        assert vectors.shape == (num_edges, 3)
+        assert x.shape == (num_edges, x.shape[-1])
+        assert V.shape == (num_edges, V.irreps.dim)
+        assert senders.shape == (num_edges,)
 
-        w = e3nn.flax.MultiLayerPerceptron((n,))(x)  # (edge, n)
-        Y = e3nn.spherical_harmonics(
-            range(self.max_ell + 1), vectors, True
-        )  # (edge, irreps)
-        wY = w[:, :, None] * Y[:, None, :]  # (edge, n, irreps)
-        wY = e3nn.scatter_sum(wY, dst=senders, map_back=True) / jnp.sqrt(
-            self.avg_num_neighbors
-        )  # (edge, n, irreps)
+        irreps_out = e3nn.Irreps(self.output_irreps)
+
+        w = e3nn.flax.MultiLayerPerceptron((V.irreps.mul_gcd,))(x)
+        Y = e3nn.spherical_harmonics(range(self.max_ell + 1), vectors, True)
+        wY = e3nn.scatter_sum(
+            w[:, :, None] * Y[:, None, :], dst=senders, map_back=True
+        ) / jnp.sqrt(self.avg_num_neighbors)
+        assert wY.shape == (num_edges, V.irreps.mul_gcd, wY.irreps.dim)
 
         V = e3nn.tensor_product(
-            wY, V, filter_ir_out="0e" + irreps_out
-        )  # (edge, n, irreps)
+            wY, V.mul_to_axis(), filter_ir_out="0e" + irreps_out
+        ).axis_to_mul()
 
         if "0e" in V.irreps:
-            x = jnp.concatenate([x, V.filter(keep="0e").axis_to_mul().array], axis=1)
+            x = jnp.concatenate([x, V.filter(keep="0e").array], axis=1)
             V = V.filter(drop="0e")
 
         x = e3nn.flax.MultiLayerPerceptron(
             (self.mlp_n_hidden,) * self.mlp_n_layers,
             self.mlp_activation,
             output_activation=False,
-        )(
-            x
-        )  # (edge, features_out)
+        )(x)
         lengths = e3nn.norm(vectors).array
-        x = u(lengths, self.p) * x  # (edge, features_out)
+        x = u(lengths, self.p) * x
+        assert x.shape == (num_edges, self.mlp_n_hidden)
 
-        V = V.axis_to_mul()  # (edge, n * irreps)
-        V = e3nn.flax.Linear(irreps_out)(V)  # (edge, n_out * irreps_out)
-        V = V.mul_to_axis()  # (edge, n_out, irreps_out)
+        V = e3nn.flax.Linear(irreps_out)(V)
+        assert V.shape == (num_edges, V.irreps.dim)
 
         return (x, V)
 
@@ -95,15 +96,20 @@ class Allegro(flax.linen.Module):
         receivers: jnp.ndarray,  # [n_edges]
         edge_feats: Optional[e3nn.IrrepsArray] = None,  # [n_edges, irreps]
     ) -> e3nn.IrrepsArray:
+        num_edges = vectors.shape[0]
+        num_nodes = node_attrs.shape[0]
+        assert vectors.shape == (num_edges, 3)
+        assert node_attrs.shape == (num_nodes, node_attrs.shape[-1])
+        assert senders.shape == (num_edges,)
+        assert receivers.shape == (num_edges,)
+
         assert vectors.irreps in ["1o", "1e"]
         irreps = e3nn.Irreps(self.irreps)
         irreps_out = e3nn.Irreps(self.output_irreps)
 
-        assert vectors.shape == senders.shape + (3,)
-
         vectors = vectors / self.radial_cutoff
 
-        d = e3nn.norm(vectors).array.squeeze(1)  # (edge,)
+        d = e3nn.norm(vectors).array.squeeze(1)
         x = jnp.concatenate(
             [
                 normalized_bessel(d, self.n_radial_basis),
@@ -112,9 +118,10 @@ class Allegro(flax.linen.Module):
             ],
             axis=1,
         )
+        assert x.shape == (num_edges, self.n_radial_basis + 2 * node_attrs.shape[-1])
 
-        # Protect against exploding dummy edges
-        x = jnp.where(d[:, None] == 0.0, 0.0, x)  # (edge, features)
+        # Protection against exploding dummy edges:
+        x = jnp.where(d[:, None] == 0.0, 0.0, x)
 
         x = e3nn.flax.MultiLayerPerceptron(
             (
@@ -125,20 +132,21 @@ class Allegro(flax.linen.Module):
             ),
             self.mlp_activation,
             output_activation=False,
-        )(
-            x
-        )  # (edge, features)
-        x = u(d, self.p)[:, None] * x  # (edge, features)
+        )(x)
+        x = u(d, self.p)[:, None] * x
+        assert x.shape == (num_edges, self.mlp_n_hidden)
 
-        V = e3nn.spherical_harmonics(
-            range(irreps.lmax + 1), vectors, True
-        )  # (edge, irreps)
+        irreps_Y = irreps.filter(
+            keep=lambda mir: vectors.irreps[0].ir.p ** mir.ir.l == mir.ir.p
+        )
+        V = e3nn.spherical_harmonics(irreps_Y, vectors, True)
 
         if edge_feats is not None:
-            V = e3nn.concatenate([V, edge_feats])  # (edge, irreps)
+            V = e3nn.concatenate([V, edge_feats])
 
-        w = e3nn.flax.MultiLayerPerceptron((irreps.mul_gcd,))(x)  # (edge, n)
-        V = w[:, :, None] * V[:, None, :]  # (edge, n, irreps)
+        w = e3nn.flax.MultiLayerPerceptron((V.irreps.num_irreps,))(x)
+        V = w * V
+        assert V.shape == (num_edges, V.irreps.dim)
 
         for _ in range(self.num_layers):
             y, V = AllegroLayer(
@@ -149,19 +157,16 @@ class Allegro(flax.linen.Module):
                 mlp_n_hidden=self.mlp_n_hidden,
                 mlp_n_layers=self.mlp_n_layers,
                 p=self.p,
-            )(
-                vectors,
-                x,
-                V,
-                senders,
-            )
+            )(vectors, x, V, senders)
 
             alpha = 0.5
             x = (x + alpha * y) / jnp.sqrt(1 + alpha**2)
 
-        x = e3nn.flax.MultiLayerPerceptron((128,))(x)  # (edge, 128)
+        x = e3nn.flax.MultiLayerPerceptron((128,))(x)
 
-        xV = e3nn.concatenate([e3nn.as_irreps_array(x), V.axis_to_mul()])
-        xV = e3nn.flax.Linear(irreps_out)(xV)  # (edge, irreps_out)
+        xV = e3nn.flax.Linear(irreps_out)(e3nn.concatenate([x, V]))
+
+        if xV.irreps != irreps_out:
+            raise ValueError(f"output_irreps {irreps_out} is not reachable")
 
         return xV

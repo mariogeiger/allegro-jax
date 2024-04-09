@@ -36,7 +36,6 @@ class FlaxModel(flax.linen.Module):
             node_attrs, vectors, graph.senders, graph.receivers
         )
 
-    
 
 def test_allegro_flax():
     graph = dummy_graph()
@@ -47,7 +46,6 @@ def test_allegro_flax():
     apply = jax.jit(model.apply)
     apply(w, graph)
     apply(w, graph)
-
 
 
 def test_allegro_haiku():

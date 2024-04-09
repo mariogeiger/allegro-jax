@@ -5,9 +5,9 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 
-from .allegro_flax import  allegro_call, allegro_layer_call
+from .allegro_flax import allegro_call, allegro_layer_call
 
-        
+
 class AllegroHaikuLayer(hk.Module):
 
     def __init__(

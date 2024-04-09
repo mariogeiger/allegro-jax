@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 from .allegro import allegro_call, allegro_layer_call
 
+
 class AllegroLayer(nn.Module):
     avg_num_neighbors: float
     max_ell: int = 3
@@ -57,7 +58,7 @@ class Allegro(nn.Module):
         receivers: jnp.ndarray,  # [n_edges]
         edge_feats: Optional[e3nn.IrrepsArray] = None,  # [n_edges, irreps]
     ) -> e3nn.IrrepsArray:
-        
+
         return allegro_call(
             e3nn.flax.Linear,
             e3nn.flax.MultiLayerPerceptron,
